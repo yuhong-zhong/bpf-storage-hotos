@@ -120,6 +120,10 @@ To disable CPU frequency scaling on Intel CPUs, you can:
   * `scaling_governor`, `scaling_max_freq`, and `scaling_min_freq` for each CPU core are available in `/sys/devices/system/cpu/cpu$CPUID/`, where `$CPUID` is the core number
   * You can find the max frequency of a CPU core in `cpuinfo_max_freq`
 
+* Disable all C-states except for C0 state for each online CPU core
+
+  * C-state knobs for each CPU core are available in `/sys/devices/system/cpu/cpu$CPUID/cpuidle`, where `$CPUID` is the core number
+
 * Run the following script to disable global CPU frequency scaling and turbo boost:
 
   ```bash
