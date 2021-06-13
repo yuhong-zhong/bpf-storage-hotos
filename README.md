@@ -55,18 +55,18 @@ make localmodconfig
 make deb-pkg
 ```
 
-After the kernel is sucessfully compiled, install all the  `.deb`  files generated in the parent folder of  `linux`:
+After the kernel is successfully compiled, install all the  `.deb`  files generated in the parent folder of  `linux`:
 
 ```bash
 cd ..
 sudo dpkg -i *.deb
 ```
 
-Finally, reboot the machine and make sure that you boot into the right kernel. You can examine your current kernel by running `uname -r` and boot into another kernel using `grub-reboot`.
+Finally, reboot the machine and make sure that you boot into the right kernel. You can examine your current kernel by running `uname -r` and boot into another kernel using `grub-reboot` with a reboot.
 
 ## Load BPF Program
 
-In the micro-benchmarks mentioned in the papar, we use a simple BPF program running memcpy to simulate a B-Tree page parsing.
+In the micro-benchmarks mentioned in the papar, we use a simple BPF program running memcpy to simulate B-Tree page parsing.
 
 First, install the dependencies for building and loading BPF programs:
 
@@ -143,7 +143,7 @@ sudo ./read_bpf <number of threads> <b-tree depth> <number of iterations> <devic
 
 After the benchmark is finished, it will print the latency of each simulated b-tree lookup at nanosecond scale.
 
-To monitor the IOPS, you can run `sar -d -p 1 3600`. Note that for `./read_bpf` with the dispatch hook in the NVMe driver, the actual IOPS is the IOPS reported by `sar` times B-Tree depth, since `sar` only captures IOPS in the Linux block layer, while the I/O request resubmission happens in the NVMe driver in this case.
+To monitor the IOPS, you can run `sar -d -p 1 3600`. Note that for `./read_bpf` with the dispatch hook in the NVMe driver, the actual IOPS is the IOPS reported by `sar` times the B-Tree depth, since `sar` only captures IOPS in the Linux block layer, while the I/O request resubmission happens in the NVMe driver in this case.
 
 ### io_uring
 
@@ -159,7 +159,7 @@ sudo ./uring_bpf <batch size> <b-tree depth> <number of iterations> <devices, e.
 
 After the benchmark is finished, it will print the latency of each simulated b-tree lookup at nanosecond scale.
 
-To monitor the IOPS, you can run `sar -d -p 1 3600`. Note that for `./uring_bpf` with the dispatch hook in the NVMe driver, the actual IOPS is the IOPS reported by `sar` times B-Tree depth, since `sar` only captures IOPS in the Linux block layer, while the I/O request resubmission happens in the NVMe driver in this case.
+To monitor the IOPS, you can run `sar -d -p 1 3600`. Note that for `./uring_bpf` with the dispatch hook in the NVMe driver, the actual IOPS is the IOPS reported by `sar` times the B-Tree depth, since `sar` only captures IOPS in the Linux block layer, while the I/O request resubmission happens in the NVMe driver in this case.
 
 ## Contact
 
