@@ -21,13 +21,13 @@ int main(int argc, char **argv)
 	struct bpf_object *obj;
 	int ret, progfd;
 
-	ret = bpf_prog_load("bpf_program.o", BPF_PROG_TYPE_IMPOSTER, &obj, &progfd);
+	ret = bpf_prog_load("bpf_program.o", BPF_PROG_TYPE_STORAGE, &obj, &progfd);
 	if (ret) {
 		printf("Failed to load bpf program\n");
 		exit(1);
 	}
 
-	ret = bpf_prog_attach(/*prog_fd=*/progfd, /*target_fd=*/0, BPF_IMPOSTER, 0);
+	ret = bpf_prog_attach(/*prog_fd=*/progfd, /*target_fd=*/0, BPF_STORAGE, 0);
 	if (ret) {
 		printf("Failed to attach bpf\n");
 		exit(1);
