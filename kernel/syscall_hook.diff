@@ -1,0 +1,297 @@
+diff --git a/Makefile b/Makefile
+index 24a4c1b97bb0..5449ee659860 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 8
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION =-bpf-storage-syscall
+ NAME = Kleptomaniac Octopus
+ 
+ # *DOCUMENTATION*
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index 78847b32e137..f9a4b4b7bdda 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -360,6 +360,7 @@
+ 437	common	openat2			sys_openat2
+ 438	common	pidfd_getfd		sys_pidfd_getfd
+ 439	common	faccessat2		sys_faccessat2
++440	common	set_bpf_level		sys_set_bpf_level
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff --git a/fs/ioctl.c b/fs/ioctl.c
+index d69786d1dd91..9ccd5201331d 100644
+--- a/fs/ioctl.c
++++ b/fs/ioctl.c
+@@ -19,6 +19,8 @@
+ #include <linux/falloc.h>
+ #include <linux/sched/signal.h>
+ #include <linux/fiemap.h>
++#include <linux/bpf.h>
++#include <linux/filter.h>
+ 
+ #include "internal.h"
+ 
+@@ -762,6 +764,57 @@ SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
+ 	return ksys_ioctl(fd, cmd, arg);
+ }
+ 
++SYSCALL_DEFINE2(set_bpf_level, int, fd, int, level)
++{
++	struct fd f = fdget_pos(fd);
++	long ret = -EBADF;
++
++	if (f.file) {
++		f.file->_bpf_level = level;
++		fdput_pos(f);
++		ret = 0;
++	} else {
++		printk("set_bpf_level: bad file descriptor\n");
++	}
++
++	return ret;
++}
++
++struct bpf_prog __rcu *_bpf_prog;
++EXPORT_SYMBOL(_bpf_prog);
++
++struct bpf_storage_kern _bpf_g_context;
++EXPORT_SYMBOL(_bpf_g_context);
++
++int _storage_bpf_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog)
++{
++	rcu_assign_pointer(_bpf_prog, prog);
++	return 0;
++}
++
++int _storage_bpf_prog_detach(const union bpf_attr *attr)
++{
++	rcu_assign_pointer(_bpf_prog, NULL);
++	return 0;
++}
++
++const struct bpf_prog_ops storage_prog_ops = {};
++
++static const struct bpf_func_proto *
++storage_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
++{
++	return bpf_base_func_proto(func_id);
++}
++
++static bool storage_is_valid_access(int off, int size, enum bpf_access_type type, const struct bpf_prog *prog, struct bpf_insn_access_aux *info){
++	return true;
++}
++
++const struct bpf_verifier_ops storage_verifier_ops = {
++	.get_func_proto = storage_func_proto,
++	.is_valid_access = storage_is_valid_access,
++};
++
+ #ifdef CONFIG_COMPAT
+ /**
+  * compat_ptr_ioctl - generic implementation of .compat_ioctl file operation
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 4fb797822567..22e9880af502 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -21,6 +21,8 @@
+ #include <linux/mount.h>
+ #include <linux/fs.h>
+ #include "internal.h"
++#include <linux/bpf.h>
++#include <linux/filter.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
+@@ -612,9 +614,63 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
+ 	return ret;
+ }
+ 
++extern struct bpf_prog __rcu *_bpf_prog;
++extern struct bpf_storage_kern _bpf_g_context;
++
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
+-	return ksys_read(fd, buf, count);
++	struct fd f;
++	int _bpf_level;
++	loff_t pos, *ppos;
++
++	/* check bpf level info */
++	f = fdget_pos(fd);
++	if (!f.file) {
++		return -EBADF;
++	}
++	_bpf_level = f.file->_bpf_level;
++	ppos = file_ppos(f.file);
++	if (ppos) {
++		pos = *ppos;
++	}
++	fdput_pos(f);
++
++	if (_bpf_level == 0) {
++		/* normal read */
++		return ksys_read(fd, buf, count);
++	} else {
++		/* bpf read with resubmission */
++		if (!ppos) {
++			printk("bpf read: invalid offset\n");
++			return -EBADF;
++		}
++		long index = pos >> 12;
++		int i;
++		struct bpf_prog *_local_bpf_prog;
++		u32 _bpf_return;
++		for (i = 0; i < _bpf_level; ++i) {
++			if (i > 0) {
++				rcu_read_lock();
++				_local_bpf_prog = rcu_dereference(_bpf_prog);
++				if (_local_bpf_prog) {
++					_bpf_return = BPF_PROG_RUN(_local_bpf_prog, &_bpf_g_context);
++				}
++				rcu_read_unlock();
++			}
++			off_t lseek_ret = ksys_lseek(fd, index << 12, SEEK_SET);
++			if (lseek_ret != index << 12) {
++				printk("bpf read: ksys_lseek failed\n");
++				return -EBADF;
++			}
++			ssize_t read_ret = ksys_read(fd, buf, count);
++			if (read_ret != count) {
++				printk("bpf read: ksys_read failed\n");
++				return -EBADF;
++			}
++			index = (index * 1103515245 + 12345) % (1 << 23);  /* randomly choose next offset */
++		}
++		return count;
++	}
+ }
+ 
+ ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
+diff --git a/include/linux/bpf_types.h b/include/linux/bpf_types.h
+index a18ae82a298a..53e695703b57 100644
+--- a/include/linux/bpf_types.h
++++ b/include/linux/bpf_types.h
+@@ -76,6 +76,9 @@ BPF_PROG_TYPE(BPF_PROG_TYPE_LSM, lsm,
+ #endif /* CONFIG_BPF_LSM */
+ #endif
+ 
++BPF_PROG_TYPE(BPF_PROG_TYPE_STORAGE, storage,
++              struct bpf_storage, struct bpf_storage_kern)
++
+ BPF_MAP_TYPE(BPF_MAP_TYPE_ARRAY, array_map_ops)
+ BPF_MAP_TYPE(BPF_MAP_TYPE_PERCPU_ARRAY, percpu_array_map_ops)
+ BPF_MAP_TYPE(BPF_MAP_TYPE_PROG_ARRAY, prog_array_map_ops)
+diff --git a/include/linux/filter.h b/include/linux/filter.h
+index 0b0144752d78..cb81a2458192 100644
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -1278,4 +1278,8 @@ struct bpf_sockopt_kern {
+ 	s32		retval;
+ };
+ 
++struct bpf_storage_kern {
++	char data[512];
++};
++
+ #endif /* __LINUX_FILTER_H__ */
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index f5abba86107d..a209bd67209e 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -950,6 +950,8 @@ struct file {
+ 	struct inode		*f_inode;	/* cached value */
+ 	const struct file_operations	*f_op;
+ 
++	int _bpf_level;
++
+ 	/*
+ 	 * Protects f_ep_links, f_flags.
+ 	 * Must not be taken from IRQ context.
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index b951a87da987..84e9b80c4bf3 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -1424,4 +1424,6 @@ long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
+ 			    unsigned int nsops,
+ 			    const struct old_timespec32 __user *timeout);
+ 
++asmlinkage long sys_set_bpf_level(int fd, int level);
++
+ #endif
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 8bd33050b7bb..0fce9b3d875c 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -189,6 +189,7 @@ enum bpf_prog_type {
+ 	BPF_PROG_TYPE_STRUCT_OPS,
+ 	BPF_PROG_TYPE_EXT,
+ 	BPF_PROG_TYPE_LSM,
++	BPF_PROG_TYPE_STORAGE,
+ };
+ 
+ enum bpf_attach_type {
+@@ -226,6 +227,7 @@ enum bpf_attach_type {
+ 	BPF_CGROUP_INET4_GETSOCKNAME,
+ 	BPF_CGROUP_INET6_GETSOCKNAME,
+ 	BPF_XDP_DEVMAP,
++	BPF_STORAGE,
+ 	__MAX_BPF_ATTACH_TYPE
+ };
+ 
+@@ -4261,4 +4263,9 @@ struct bpf_pidns_info {
+ 	__u32 pid;
+ 	__u32 tgid;
+ };
++
++struct bpf_storage {
++	char data[512];
++};
++
+ #endif /* _UAPI__LINUX_BPF_H__ */
+diff --git a/kernel/bpf/syscall.c b/kernel/bpf/syscall.c
+index 0fd80ac81f70..8550179bbc43 100644
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -2815,6 +2815,8 @@ attach_type_to_prog_type(enum bpf_attach_type attach_type)
+ 		return BPF_PROG_TYPE_CGROUP_SOCKOPT;
+ 	case BPF_TRACE_ITER:
+ 		return BPF_PROG_TYPE_TRACING;
++	case BPF_STORAGE:
++		return BPF_PROG_TYPE_STORAGE;
+ 	default:
+ 		return BPF_PROG_TYPE_UNSPEC;
+ 	}
+@@ -2825,6 +2827,9 @@ attach_type_to_prog_type(enum bpf_attach_type attach_type)
+ #define BPF_F_ATTACH_MASK \
+ 	(BPF_F_ALLOW_OVERRIDE | BPF_F_ALLOW_MULTI | BPF_F_REPLACE)
+ 
++int _storage_bpf_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog);
++int _storage_bpf_prog_detach(const union bpf_attr *attr);
++
+ static int bpf_prog_attach(const union bpf_attr *attr)
+ {
+ 	enum bpf_prog_type ptype;
+@@ -2870,6 +2875,9 @@ static int bpf_prog_attach(const union bpf_attr *attr)
+ 	case BPF_PROG_TYPE_SOCK_OPS:
+ 		ret = cgroup_bpf_prog_attach(attr, ptype, prog);
+ 		break;
++	case BPF_PROG_TYPE_STORAGE:
++		ret = _storage_bpf_prog_attach(attr, prog);
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 	}
+@@ -2906,6 +2914,8 @@ static int bpf_prog_detach(const union bpf_attr *attr)
+ 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
+ 	case BPF_PROG_TYPE_SOCK_OPS:
+ 		return cgroup_bpf_prog_detach(attr, ptype);
++	case BPF_PROG_TYPE_STORAGE:
++		return _storage_bpf_prog_detach(attr);
+ 	default:
+ 		return -EINVAL;
+ 	}
